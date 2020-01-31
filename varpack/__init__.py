@@ -2,11 +2,33 @@ import numpy as np
 import pickle
 import os
 import json
+import sys
 
 # min required Python 3.2
 
-PICKLE_FILENAME = 'all_pickled_vars.pickle'
+PICKLE_FILENAME = 'misc_vars.pickle'
 JSON_FILENAME = 'pack.json'
+
+
+def get_total_obj_size(obj, seen=None):
+    """Recursively finds size of objects, includes the size of embedded objects."""
+    size = sys.getsizeof(obj)
+    if seen is None:
+        seen = set()
+    obj_id = id(obj)
+    if obj_id in seen:
+        return 0
+    # Important mark as seen *before* entering recursion to gracefully handle
+    # self-referential objects
+    seen.add(obj_id)
+    if isinstance(obj, dict):
+        size += sum([get_total_obj_size(v, seen) for v in obj.values()])
+        size += sum([get_total_obj_size(k, seen) for k in obj.keys()])
+    elif hasattr(obj, '__dict__'):
+        size += get_total_obj_size(obj.__dict__, seen)
+    elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes, bytearray)):
+        size += sum([get_total_obj_size(i, seen) for i in obj])
+    return size
 
 
 class NumpyArrayPlaceholder:
@@ -16,13 +38,29 @@ class NumpyArrayPlaceholder:
             try:
                 # need to allow pickle here since no other way to save mixed numpy and Python objects
                 np.save(filename, np_arr, allow_pickle=True)
-                self.filename = filename
-            except:
+                self.filename = os.path.basename(filename)
+            except EnvironmentError:
                 print('Failed in saving numpy placeholder file:', filename)
                 self.filename = None  # means it was not successful
 
-    def load(self):
-        pass
+    def load(self, load_folder, mmap_mode):
+
+        # need to allow pickle here since no other way to save mixed numpy and Python objects
+        full_filename = os.path.join(load_folder, self.filename)
+
+        try:
+            np_arr = np.load(full_filename, allow_pickle=True, mmap_mode=mmap_mode)
+            return np_arr
+        except:
+            print('Failed to memory map file:', full_filename)
+            if mmap_mode is not None:
+                try:
+                    np_arr = np.load(full_filename, mmap_mode=None)
+                    print('Loaded it all in memory instead.')
+                    return np_arr
+                except:
+                    print('Also failed to load it all in memory.')
+                    return self
 
 
 class VarPack:
@@ -47,7 +85,7 @@ class VarPack:
         for var_name in obj_vars:
 
             self.__internal__['var_info'][var_name] = dict()
-            self.__internal__['var_info'][var_name]['size'] = obj_vars[var_name].__sizeof__()
+            self.__internal__['var_info'][var_name]['size'] = get_total_obj_size(obj_vars[var_name])
 
             # if the variable is a numpy array then try to save it as .npy
             if isinstance(obj_vars[var_name], np.ndarray):
@@ -69,6 +107,7 @@ class VarPack:
                     for k in obj_vars[var_name]:
                         # if the key is a numpy array and has enough elements that makes it worth saving as a
                         # separate file.
+                        uses_numpy_placeholders = False
                         if isinstance(obj_vars[var_name][k], np.ndarray) and \
                                 obj_vars[var_name][k].size >= self.__internal__['min_dict_numpy_size']:
                             numpy_array_placeholder = NumpyArrayPlaceholder(obj_vars[var_name][k],
@@ -78,6 +117,17 @@ class VarPack:
                             # put the placeholder object there instead.
                             if numpy_array_placeholder.filename is not None:
                                 obj_vars[var_name][k] = numpy_array_placeholder
+                                uses_numpy_placeholders = True
+
+                    # update the size of the variable now that large numpy arrays have been replaced with placeholders
+                    if uses_numpy_placeholders:
+                        self.__internal__['var_info'][var_name]['size_before_numpy_placeholders'] = \
+                            self.__internal__['var_info'][var_name]['size']
+
+                        self.__internal__['var_info'][var_name]['size'] = get_total_obj_size(obj_vars[var_name])
+
+                    # keep track of whether the dictionary is using numpy placeholder objects (useful when loading)
+                    self.__internal__['var_info'][var_name]['uses_numpy_placeholders'] = uses_numpy_placeholders
 
         # save the rest of variables as pickle
         pickle_dict = dict()
@@ -93,7 +143,7 @@ class VarPack:
         with open(os.path.join(save_folder, JSON_FILENAME), 'w') as outfile:
             json.dump(self.__internal__['var_info'], outfile, indent=4)
 
-    def load(self, load_folder, memory_map=True, stop_on_error=True):
+    def load(self, load_folder, try_numpy_mmap_mode='r+', stop_on_error=True):
 
         # read the manifest.json file
         try:
@@ -103,6 +153,7 @@ class VarPack:
             print('Error when loading ' + JSON_FILENAME + ' file.')
             return None
 
+        # get all the files where the variables have been saved to (in case there are extra files in the folder)
         files_to_load = [var_info[var_name]['filename'] for var_name in var_info]
         files_to_load = list(set(files_to_load))  # find unique files
 
@@ -117,7 +168,20 @@ class VarPack:
 
                     # transfer the variables to the object
                     for v in loaded_vars:
+                        if 'uses_numpy_placeholders' in var_info[v] and var_info[v]['uses_numpy_placeholders']:
+                            # go over keys in the dictionary and replace the placeholders with numpy arrays
+                            for k in loaded_vars[v]:
+                                if isinstance(loaded_vars[v][k], NumpyArrayPlaceholder):
+                                    loaded_vars[v][k] = loaded_vars[v][k].load(load_folder, try_numpy_mmap_mode)
+
+                                    if isinstance(loaded_vars[v][k], NumpyArrayPlaceholder):
+                                        print('Could load numpy array from the placeholder in variable: %s, key: %s'
+                                              % (v, k))
+                                        if stop_on_error:
+                                            return None
+
                         self.__setattr__(v, loaded_vars[v])
+
                 except EnvironmentError:
                     print('Error when loading ' + file_name + ' file.')
                     if stop_on_error:

@@ -3,6 +3,7 @@ import pickle
 import os
 import json
 import sys
+import shutil
 
 # min required Python 3.4
 
@@ -70,6 +71,11 @@ class VarPack:
     def __init__(self):
         self.__internal__ = dict()
 
+        # for each variable as key, contains different information such as its size (in memory) and
+        # the file where it is saved.
+        self.__internal__['var_info'] = dict()
+        self.__internal__['loaded_from_folder'] = None
+
     def save(self, save_folder: str, max_dict_keys=1000, min_dict_numpy_size=10000, sep_var_min_size=1e4,
              sep_vars=None):
         """
@@ -94,71 +100,74 @@ class VarPack:
 
         obj_vars = vars(self)
 
-        # for each variable as key, contains different information such as its size (in memory) and
-        # the file where it is saved.
-        self.__internal__['var_info'] = dict()
-
         if sep_vars is None:
-            sep_vars = list()
+            sep_vars = set()
         else:
             sep_vars = set(sep_vars)
 
         for var_name in obj_vars:
+            if var_name != '__internal__':
+                self.__internal__['var_info'][var_name] = dict()
+                self.__internal__['var_info'][var_name]['size'] = get_total_obj_size(obj_vars[var_name])
 
-            self.__internal__['var_info'][var_name] = dict()
-            self.__internal__['var_info'][var_name]['size'] = get_total_obj_size(obj_vars[var_name])
+                # if the variable is a numpy array then try to save it as .npy
+                if isinstance(obj_vars[var_name], np.ndarray):
+                    try:
+                        filename = var_name + '.npy'
+                        np.save(os.path.join(save_folder, filename), obj_vars[var_name],
+                                allow_pickle=False)  # need to disallow pickle here otherwise all vars are saved
 
-            # if the variable is a numpy array then try to save it as .npy
-            if isinstance(obj_vars[var_name], np.ndarray):
-                try:
-                    filename = var_name + '.npy'
-                    np.save(os.path.join(save_folder, filename), obj_vars[var_name],
-                            allow_pickle=False)  # need to disallow pickle here otherwise all vars are saved
-
-                    self.__internal__['var_info'][var_name]['filename'] = filename
-                    self.__internal__['var_info'][var_name]['shape'] = obj_vars[var_name].shape
-                    self.__internal__['var_info'][var_name]['dtype'] = str(obj_vars[var_name].dtype)
-                except:
+                        self.__internal__['var_info'][var_name]['filename'] = filename
+                        self.__internal__['var_info'][var_name]['shape'] = obj_vars[var_name].shape
+                        self.__internal__['var_info'][var_name]['dtype'] = str(obj_vars[var_name].dtype)
+                    except:
+                        pickle_vars.append(var_name)
+                else:  # cannot readily be saved as a numpy array
                     pickle_vars.append(var_name)
-            else:  # cannot readily be saved as a numpy array
-                pickle_vars.append(var_name)
 
-                # see if it is dictionary made up of numpy arrays (and not has too many keys)
-                if type(obj_vars[var_name]) is dict and len(obj_vars[var_name]) < max_dict_keys:
-                    uses_numpy_placeholders = False
-                    for k in obj_vars[var_name]:
-                        # if the key is a numpy array and has enough elements that makes it worth saving as a
-                        # separate file.
+                    # see if it is dictionary made up of numpy arrays (and not has too many keys)
+                    if type(obj_vars[var_name]) is dict and len(obj_vars[var_name]) < max_dict_keys:
+                        uses_numpy_placeholders = False
+                        for k in obj_vars[var_name]:
+                            # if the key is a numpy array and has enough elements that makes it worth saving as a
+                            # separate file.
 
-                        if isinstance(obj_vars[var_name][k], np.ndarray) and \
-                                obj_vars[var_name][k].size >= min_dict_numpy_size:
-                            numpy_array_placeholder = NumpyArrayPlaceholder(obj_vars[var_name][k],
-                                                                            save_folder=save_folder, var_name=var_name,
-                                                                            key_hash=k.__hash__())
-                            # if saving the value as a numpy array was successful,
-                            # put the placeholder object there instead.
-                            if numpy_array_placeholder.filename is not None:
-                                obj_vars[var_name][k] = numpy_array_placeholder
-                                uses_numpy_placeholders = True
+                            if isinstance(obj_vars[var_name][k], np.ndarray) and \
+                                    obj_vars[var_name][k].size >= min_dict_numpy_size:
+                                numpy_array_placeholder = NumpyArrayPlaceholder(obj_vars[var_name][k],
+                                                                                save_folder=save_folder, var_name=var_name,
+                                                                                key_hash=k.__hash__())
+                                # if saving the value as a numpy array was successful,
+                                # put the placeholder object there instead.
+                                if numpy_array_placeholder.filename is not None:
+                                    obj_vars[var_name][k] = numpy_array_placeholder
+                                    uses_numpy_placeholders = True
 
-                    # update the size of the variable now that large numpy arrays have been replaced with placeholders
-                    if uses_numpy_placeholders:
-                        self.__internal__['var_info'][var_name]['size_before_numpy_placeholders'] = \
-                            self.__internal__['var_info'][var_name]['size']
+                        # update the size of the variable now that large numpy arrays have been replaced with placeholders
+                        if uses_numpy_placeholders:
+                            self.__internal__['var_info'][var_name]['size_before_numpy_placeholders'] = \
+                                self.__internal__['var_info'][var_name]['size']
 
-                        self.__internal__['var_info'][var_name]['size'] = get_total_obj_size(obj_vars[var_name])
+                            self.__internal__['var_info'][var_name]['size'] = get_total_obj_size(obj_vars[var_name])
 
-                    # keep track of whether the dictionary is using numpy placeholder objects (useful when loading)
-                    self.__internal__['var_info'][var_name]['uses_numpy_placeholders'] = uses_numpy_placeholders
+                        # keep track of whether the dictionary is using numpy placeholder objects (useful when loading)
+                        self.__internal__['var_info'][var_name]['uses_numpy_placeholders'] = uses_numpy_placeholders
 
-                # identify variables that are too large and need to be placed in separate pickle files.
-                if self.__internal__['var_info'][var_name]['size'] >= sep_var_min_size:
-                    sep_vars.add(var_name)
+                    # identify variables that are too large and need to be placed in separate pickle files.
+                    if self.__internal__['var_info'][var_name]['size'] >= sep_var_min_size:
+                        sep_vars.add(var_name)
+
+        # do not save self.__internal__
+        # if '__internal__' in pickle_vars:
+        #     pickle_vars.remove('__internal__')
+        # if '__internal__' in sep_vars:
+        #     sep_vars.remove('__internal__')
 
         # save the rest of variables as pickle
         pickle_dict = dict()
         for v in pickle_vars:
             pickle_dict[v] = self.__getattribute__(v)
+
 
         # save variables that need to have separate files
         for var_name in sep_vars:
@@ -179,19 +188,46 @@ class VarPack:
         with open(os.path.join(save_folder, JSON_FILENAME), 'w') as outfile:
             json.dump(self.__internal__['var_info'], outfile, indent=4)
 
-    def load(self, load_folder, try_numpy_mmap_mode='r+', stop_on_error=True, skip_loading=None):
+        # must copy the files skipped during loading to the save folder
+        if self.__internal__['loaded_from_folder'] is not None:
+            vars_needs_copying = set(self.__internal__['var_info'].keys()) - set(obj_vars)
+
+            files_need_copying = set()
+            for v in vars_needs_copying:
+                files_need_copying.add(self.__internal__['var_info'][v]['filename'])
+
+            # copy the files from where variables were loaded to the saved folder
+            for filename in files_need_copying:
+                shutil.copyfile(os.path.join(self.__internal__['loaded_from_folder'], filename),
+                                os.path.join(save_folder, filename))
+
+            print('Copied %d files associated with skipped variables into the save folder.' % len(files_need_copying))
+
+    def load(self, load_folder, try_numpy_mmap_mode='r+', stop_on_error=True, skip_loading=None,
+             remove_loaded_misc_skip=True):
 
         # read the manifest.json file
         try:
             with open(os.path.join(load_folder, JSON_FILENAME), 'r') as json_file:
                 var_info = json.load(json_file)
+                self.__internal__['var_info'] = var_info
         except EnvironmentError:
             print('Error when loading ' + JSON_FILENAME + ' file.')
             return None
 
         # get all the files where the variables have been saved to (in case there are extra files in the folder)
-        files_to_load = [var_info[var_name]['filename'] for var_name in var_info]
-        files_to_load = list(set(files_to_load))  # find unique files
+        files_to_load = set()
+        self.__internal__['skipped_loading'] = set()
+
+        skip_loading = set(skip_loading)
+
+        for var_name in var_info:
+            if var_name in skip_loading:
+                # remember which variables where skipped during loading
+                self.__internal__['skipped_loading'].add(var_info[var_name]['filename'])
+            else:
+                files_to_load.add(var_info[var_name]['filename'])
+        files_to_load = list(files_to_load)
 
         files_with_load_error = list()
 
@@ -217,7 +253,17 @@ class VarPack:
                                             if stop_on_error:
                                                 return None
 
-                            self.__setattr__(v, loaded_vars[v])
+                            if v in skip_loading:  # even if the variable was
+                                print('Variable %s was saved in misc. variables file so it was loaded with them.' % v)
+                                if remove_loaded_misc_skip:
+                                    print('However, it will be removed from memory.')
+                                else:
+                                    self.__setattr__(v, loaded_vars[v])
+
+                                    # since we ended up loading it anyways
+                                    self.__internal__['skipped_loading'].remove(v)
+                            else:  # if not in skip list
+                                self.__setattr__(v, loaded_vars[v])
                     else:  # if it is not the misc_vars file, then assign it directly
                         self.__setattr__(name, loaded_vars)
 
@@ -235,3 +281,9 @@ class VarPack:
             else:
                 print('Unable to load file %s: Unknown file extension %s .' % (file_name, extension))
                 files_with_load_error.append(file_name)
+
+        num_skipped_vars = len(var_info.keys()) - len(vars(self))
+        if num_skipped_vars > 0:
+            print('Skipped loading %d variables.' % num_skipped_vars)
+
+        self.__internal__['loaded_from_folder'] = load_folder

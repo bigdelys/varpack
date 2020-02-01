@@ -10,6 +10,8 @@ import shutil
 MISC_VAR_FILENAME = '__misc_vars__.pickle'
 JSON_FILENAME = 'pack.json'
 PICKLE_PROTOCOL = 4
+from typing import Union, Dict, List
+import typing
 
 
 def get_total_obj_size(obj, seen=None):
@@ -76,8 +78,9 @@ class VarPack:
         self.__internal__['var_info'] = dict()
         self.__internal__['loaded_from_folder'] = None
 
-    def save(self, save_folder: str, max_dict_keys=1000, min_dict_numpy_size=10000, sep_var_min_size=1e4,
-             sep_vars=None):
+    def save(self, save_folder: typing.Optional[str] = None, max_dict_keys: int = 1000,
+             min_dict_numpy_size: int = 10000,
+             sep_var_min_size: int = 1e4, sep_vars: typing.Optional[Union[Dict, List]] = None):
         """
 
         :param save_folder: folder in which all the variables will be saved.
@@ -92,6 +95,12 @@ class VarPack:
                          All numpy arrays are automatically saved in separate .npy files.
         :return: None
         """
+
+        if save_folder is None:
+            save_folder = self.__internal__['loaded_from_folder']
+            print('Saving variables into the loaded folder: ', save_folder)
+
+        assert save_folder is not None, 'Missing save_folder input parameter and no loaded folder exists to default to.'
 
         os.makedirs(save_folder, exist_ok=True)
 
@@ -188,8 +197,9 @@ class VarPack:
         with open(os.path.join(save_folder, JSON_FILENAME), 'w') as outfile:
             json.dump(self.__internal__['var_info'], outfile, indent=4)
 
-        # must copy the files skipped during loading to the save folder
-        if self.__internal__['loaded_from_folder'] is not None:
+        # must copy the files skipped during loading to the save folder (if saving to a different folder)
+        if save_folder != self.__internal__['loaded_from_folder'] and \
+                self.__internal__['loaded_from_folder'] is not None:
             vars_needs_copying = set(self.__internal__['var_info'].keys()) - set(obj_vars)
 
             files_need_copying = set()
@@ -203,8 +213,7 @@ class VarPack:
 
             print('Copied %d files associated with skipped variables into the save folder.' % len(files_need_copying))
 
-    def load(self, load_folder, try_numpy_mmap_mode='r+', stop_on_error=True, skip_loading=None,
-             remove_loaded_misc_skip=True):
+    def load(self, load_folder, try_numpy_mmap_mode='r+', stop_on_error=True, skip_loading=None):
 
         # read the manifest.json file
         try:
@@ -217,14 +226,14 @@ class VarPack:
 
         # get all the files where the variables have been saved to (in case there are extra files in the folder)
         files_to_load = set()
-        self.__internal__['skipped_loading'] = set()
+        self.__internal__['skipped_loading_vars'] = set()
 
         skip_loading = set(skip_loading)
 
         for var_name in var_info:
             if var_name in skip_loading:
                 # remember which variables where skipped during loading
-                self.__internal__['skipped_loading'].add(var_info[var_name]['filename'])
+                self.__internal__['skipped_loading_vars'].add(var_name)
             else:
                 files_to_load.add(var_info[var_name]['filename'])
         files_to_load = list(files_to_load)
@@ -255,13 +264,10 @@ class VarPack:
 
                             if v in skip_loading:  # even if the variable was
                                 print('Variable %s was saved in misc. variables file so it was loaded with them.' % v)
-                                if remove_loaded_misc_skip:
-                                    print('However, it will be removed from memory.')
-                                else:
-                                    self.__setattr__(v, loaded_vars[v])
+                                self.__setattr__(v, loaded_vars[v])
 
-                                    # since we ended up loading it anyways
-                                    self.__internal__['skipped_loading'].remove(v)
+                                # since we ended up loading it anyways
+                                self.__internal__['skipped_loading_vars'].remove(v)
                             else:  # if not in skip list
                                 self.__setattr__(v, loaded_vars[v])
                     else:  # if it is not the misc_vars file, then assign it directly

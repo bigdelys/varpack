@@ -4,10 +4,11 @@ import os
 import json
 import sys
 
-# min required Python 3.2
+# min required Python 3.4
 
-PICKLE_FILENAME = 'misc_vars.pickle'
+MISC_VAR_FILENAME = '__misc_vars__.pickle'
 JSON_FILENAME = 'pack.json'
+PICKLE_PROTOCOL = 4
 
 
 def get_total_obj_size(obj, seen=None):
@@ -32,6 +33,7 @@ def get_total_obj_size(obj, seen=None):
 
 
 class NumpyArrayPlaceholder:
+
     def __init__(self, np_arr=None, save_folder=None, var_name=None, key_hash=None):
         if np_arr is not None:
             filename = os.path.join(save_folder, var_name + str(key_hash) + '.npy')
@@ -65,11 +67,25 @@ class NumpyArrayPlaceholder:
 
 class VarPack:
 
-    def __init__(self, max_dict_keys=1000, min_dict_numpy_size=10000):
-        self.__internal__ = {'max_dict_keys': max_dict_keys,
-                             'min_dict_numpy_size': min_dict_numpy_size}
+    def __init__(self):
+        self.__internal__ = dict()
 
-    def save(self, save_folder: str):
+    def save(self, save_folder: str, max_dict_keys=1000, min_dict_numpy_size=10000, sep_var_min_size=1e4,
+             sep_vars=None):
+        """
+
+        :param save_folder: folder in which all the variables will be saved.
+        :param max_dict_keys: do not try to replace large numpy arrays with dictionaries with larger than
+                              this number of keys. This is mainly to avoid wasting time checking keys in very large
+                              dictionaries.
+        :param min_dict_numpy_size: minimum number of elements in a numpy array for it to be replaced with
+                                    a placeholder objects that points to a separate numpy file.
+        :param sep_var_min_size:  minimum total in-memory size (in bytes) for a variable to be saved in a
+                                  separate pickle file (so for example could be excluded during load).
+        :param sep_vars: a list containing variables that need to be saved in a different pickle file.
+                         All numpy arrays are automatically saved in separate .npy files.
+        :return: None
+        """
 
         os.makedirs(save_folder, exist_ok=True)
 
@@ -81,6 +97,11 @@ class VarPack:
         # for each variable as key, contains different information such as its size (in memory) and
         # the file where it is saved.
         self.__internal__['var_info'] = dict()
+
+        if sep_vars is None:
+            sep_vars = list()
+        else:
+            sep_vars = set(sep_vars)
 
         for var_name in obj_vars:
 
@@ -103,13 +124,14 @@ class VarPack:
                 pickle_vars.append(var_name)
 
                 # see if it is dictionary made up of numpy arrays (and not has too many keys)
-                if type(obj_vars[var_name]) is dict and len(obj_vars[var_name]) < self.__internal__['max_dict_keys']:
+                if type(obj_vars[var_name]) is dict and len(obj_vars[var_name]) < max_dict_keys:
+                    uses_numpy_placeholders = False
                     for k in obj_vars[var_name]:
                         # if the key is a numpy array and has enough elements that makes it worth saving as a
                         # separate file.
-                        uses_numpy_placeholders = False
+
                         if isinstance(obj_vars[var_name][k], np.ndarray) and \
-                                obj_vars[var_name][k].size >= self.__internal__['min_dict_numpy_size']:
+                                obj_vars[var_name][k].size >= min_dict_numpy_size:
                             numpy_array_placeholder = NumpyArrayPlaceholder(obj_vars[var_name][k],
                                                                             save_folder=save_folder, var_name=var_name,
                                                                             key_hash=k.__hash__())
@@ -129,21 +151,35 @@ class VarPack:
                     # keep track of whether the dictionary is using numpy placeholder objects (useful when loading)
                     self.__internal__['var_info'][var_name]['uses_numpy_placeholders'] = uses_numpy_placeholders
 
+                # identify variables that are too large and need to be placed in separate pickle files.
+                if self.__internal__['var_info'][var_name]['size'] >= sep_var_min_size:
+                    sep_vars.add(var_name)
+
         # save the rest of variables as pickle
         pickle_dict = dict()
         for v in pickle_vars:
             pickle_dict[v] = self.__getattribute__(v)
 
-            self.__internal__['var_info'][v]['filename'] = PICKLE_FILENAME
+        # save variables that need to have separate files
+        for var_name in sep_vars:
+            with open(os.path.join(save_folder, var_name + '.pickle'), 'wb') as f:
+                pickle.dump(pickle_dict[var_name], f, protocol=PICKLE_PROTOCOL)
+                self.__internal__['var_info'][var_name]['filename'] = var_name + '.pickle'
 
-        with open(os.path.join(save_folder, PICKLE_FILENAME), 'wb') as f:
-            pickle.dump(pickle_dict, f, protocol=pickle.HIGHEST_PROTOCOL)
+        misc_vars = set(pickle_vars) - sep_vars
+        misc_dict = dict()
+        for v in misc_vars:
+            misc_dict[v] = pickle_dict[v]
+            self.__internal__['var_info'][v]['filename'] = MISC_VAR_FILENAME
+
+        with open(os.path.join(save_folder, MISC_VAR_FILENAME), 'wb') as f:
+            pickle.dump(misc_dict, f, protocol=PICKLE_PROTOCOL)
 
         # save a json file with variable info
         with open(os.path.join(save_folder, JSON_FILENAME), 'w') as outfile:
             json.dump(self.__internal__['var_info'], outfile, indent=4)
 
-    def load(self, load_folder, try_numpy_mmap_mode='r+', stop_on_error=True):
+    def load(self, load_folder, try_numpy_mmap_mode='r+', stop_on_error=True, skip_loading=None):
 
         # read the manifest.json file
         try:
@@ -167,20 +203,23 @@ class VarPack:
                         loaded_vars = pickle.load(f)
 
                     # transfer the variables to the object
-                    for v in loaded_vars:
-                        if 'uses_numpy_placeholders' in var_info[v] and var_info[v]['uses_numpy_placeholders']:
-                            # go over keys in the dictionary and replace the placeholders with numpy arrays
-                            for k in loaded_vars[v]:
-                                if isinstance(loaded_vars[v][k], NumpyArrayPlaceholder):
-                                    loaded_vars[v][k] = loaded_vars[v][k].load(load_folder, try_numpy_mmap_mode)
-
+                    if file_name == MISC_VAR_FILENAME:
+                        for v in loaded_vars:
+                            if 'uses_numpy_placeholders' in var_info[v] and var_info[v]['uses_numpy_placeholders']:
+                                # go over keys in the dictionary and replace the placeholders with numpy arrays
+                                for k in loaded_vars[v]:
                                     if isinstance(loaded_vars[v][k], NumpyArrayPlaceholder):
-                                        print('Could load numpy array from the placeholder in variable: %s, key: %s'
-                                              % (v, k))
-                                        if stop_on_error:
-                                            return None
+                                        loaded_vars[v][k] = loaded_vars[v][k].load(load_folder, try_numpy_mmap_mode)
 
-                        self.__setattr__(v, loaded_vars[v])
+                                        if isinstance(loaded_vars[v][k], NumpyArrayPlaceholder):
+                                            print('Could load numpy array from the placeholder in variable: %s, key: %s'
+                                                  % (v, k))
+                                            if stop_on_error:
+                                                return None
+
+                            self.__setattr__(v, loaded_vars[v])
+                    else:  # if it is not the misc_vars file, then assign it directly
+                        self.__setattr__(name, loaded_vars)
 
                 except EnvironmentError:
                     print('Error when loading ' + file_name + ' file.')

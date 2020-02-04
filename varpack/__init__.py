@@ -38,7 +38,19 @@ def get_total_obj_size(obj, seen=None):
 class NumpyArrayPlaceholder:
 
     def __init__(self, np_arr=None, save_folder=None, var_name=None, key_hash=None):
+
         if np_arr is not None:
+
+            # if the variable is numpy mmapped
+            if isinstance(np_arr, np.memmap):
+                np_arr.flush()
+                dir_name = os.path.dirname(np_arr.filename)
+                self.filename = os.path.basename(np_arr.filename)
+                if dir_name != save_folder:   # the mmap file is in a different directory than where we are saving
+                    shutil.copyfile(np_arr.filename, os.path.join(save_folder, os.path.basename(np_arr.filename)) )
+
+                return
+
             filename = os.path.join(save_folder, var_name + str(key_hash) + '.npy')
             try:
                 # need to allow pickle here since no other way to save mixed numpy and Python objects
@@ -76,12 +88,51 @@ class VarPack:
         # for each variable as key, contains different information such as its size (in memory) and
         # the file where it is saved.
         self.__internal__['var_info'] = dict()
-        self.__internal__['loaded_from_folder'] = None
+        self.__internal__['attached_folder'] = None
+        self.__internal__['numpy_mmap_mode'] = 'r+'
+
+    def get_attached_folder(self):
+        return self.__internal__['attached_folder']
+
+    def _replace_numpy_placeholders(self, var_info, load_folder, numpy_mmap_mode, stop_on_error,
+                                    mmap_vars_list=None):
+        # go  over all the loaded variables and replace placeholder numpy arrays with mmap ones
+        all_vars = vars(self)
+        for v in all_vars:
+
+            # if v != '__internal__':
+            #     print(var_info[v])
+
+            if v != '__internal__' and 'uses_numpy_placeholders' in var_info[v] and var_info[v]['uses_numpy_placeholders']:
+                # go over keys in the dictionary and replace the placeholders with numpy arrays
+                for k in all_vars[v]:
+                    if isinstance(all_vars[v][k], NumpyArrayPlaceholder):
+                        all_vars[v][k] = all_vars[v][k].load(load_folder, numpy_mmap_mode)
+
+                        if isinstance(all_vars[v][k], NumpyArrayPlaceholder):
+                            print('Could not load numpy array from the placeholder in variable: %s, key: %s'
+                                  % (v, k))
+                            if stop_on_error:
+                                return None
+                        elif isinstance(all_vars[v][k], np.memmap):
+                            if mmap_vars_list is not None:
+                                mmap_vars_list.append(v + '[' + k + ']')
 
     def save(self, save_folder: typing.Optional[str] = None, max_dict_keys: int = 1000,
-             min_dict_numpy_size: int = 10000,
-             sep_var_min_size: int = 1e4, sep_vars: typing.Optional[Union[Dict, List]] = None):
+             min_dict_numpy_size: int = 10000, sep_var_min_size: int = 1e4,
+             sep_vars: typing.Optional[Union[Dict, List]] = None):
         """
+        Save the pack of variables. If no save folder is provided, the variables are saved in the folder from which
+        they were loaded.
+
+        * a subset variables can be marked to be saved in separate files, e.g. so they could later be loaded individually
+        or to be excluded from loading the pack.
+
+        * when saving to a new folder, files associated with variables that were excluded during load will be copied
+          into the save folder.
+
+        * saving into a new folder does not change the attached_folder (folder from which the variables were loaded).
+          Unless data was never loaded from a folder. This values is stored in .__internal__['attached_folder']
 
         :param save_folder: folder in which all the variables will be saved.
         :param max_dict_keys: do not try to replace large numpy arrays with dictionaries with larger than
@@ -97,8 +148,8 @@ class VarPack:
         """
 
         if save_folder is None:
-            save_folder = self.__internal__['loaded_from_folder']
-            print('Saving variables into the loaded folder: ', save_folder)
+            save_folder = self.__internal__['attached_folder']
+            print('Saving variables into the attached folder: ', save_folder)
 
         assert save_folder is not None, 'Missing save_folder input parameter and no loaded folder exists to default to.'
 
@@ -115,44 +166,71 @@ class VarPack:
             sep_vars = set(sep_vars)
 
         for var_name in obj_vars:
-            if var_name != '__internal__':
+            if var_name != '__internal__':  # do not save __internal__ variable.
                 self.__internal__['var_info'][var_name] = dict()
                 self.__internal__['var_info'][var_name]['size'] = get_total_obj_size(obj_vars[var_name])
 
                 # if the variable is a numpy array then try to save it as .npy
                 if isinstance(obj_vars[var_name], np.ndarray):
-                    try:
-                        filename = var_name + '.npy'
-                        np.save(os.path.join(save_folder, filename), obj_vars[var_name],
-                                allow_pickle=False)  # need to disallow pickle here otherwise all vars are saved
 
-                        self.__internal__['var_info'][var_name]['filename'] = filename
+                    if type(obj_vars[var_name]) is np.memmap:
+                        # flush mmap to disk, no need to re-save if
+                        # saving to the same folder where it is memory-mapped
+                        obj_vars[var_name].flush()
+
+                        # saving to a new folder (not where the data was loaded from)
+                        # copy numpy files
+                        if save_folder != self.__internal__['attached_folder']:
+                            print('Copying...')
+                            shutil.copyfile(obj_vars[var_name].filename,
+                                            os.path.join(save_folder, os.path.basename(obj_vars[var_name].filename)))
+
+                        self.__internal__['var_info'][var_name]['filename'] = \
+                            os.path.basename(obj_vars[var_name].filename)
                         self.__internal__['var_info'][var_name]['shape'] = obj_vars[var_name].shape
                         self.__internal__['var_info'][var_name]['dtype'] = str(obj_vars[var_name].dtype)
-                    except:
-                        pickle_vars.append(var_name)
+                    else:
+                        try:
+                            filename = var_name + '.npy'
+                            np.save(os.path.join(save_folder, filename), obj_vars[var_name],
+                                    allow_pickle=False)  # need to disallow pickle here otherwise all vars are saved
+
+                            self.__internal__['var_info'][var_name]['filename'] = filename
+                            self.__internal__['var_info'][var_name]['shape'] = obj_vars[var_name].shape
+                            self.__internal__['var_info'][var_name]['dtype'] = str(obj_vars[var_name].dtype)
+                        except:
+                            pickle_vars.append(var_name)
                 else:  # cannot readily be saved as a numpy array
                     pickle_vars.append(var_name)
 
-                    # see if it is dictionary made up of numpy arrays (and not has too many keys)
+                    # see if it is dictionary made up of numpy arrays (and does not have too many keys)
                     if type(obj_vars[var_name]) is dict and len(obj_vars[var_name]) < max_dict_keys:
                         uses_numpy_placeholders = False
+
                         for k in obj_vars[var_name]:
                             # if the key is a numpy array and has enough elements that makes it worth saving as a
                             # separate file.
 
                             if isinstance(obj_vars[var_name][k], np.ndarray) and \
                                     obj_vars[var_name][k].size >= min_dict_numpy_size:
+
+                                print('came here for ', k)
+                                print(str(type(obj_vars[var_name][k])))
                                 numpy_array_placeholder = NumpyArrayPlaceholder(obj_vars[var_name][k],
-                                                                                save_folder=save_folder, var_name=var_name,
+                                                                                save_folder=save_folder,
+                                                                                var_name=var_name,
                                                                                 key_hash=k.__hash__())
+
+                                print('came out for ', k)
+
                                 # if saving the value as a numpy array was successful,
                                 # put the placeholder object there instead.
                                 if numpy_array_placeholder.filename is not None:
                                     obj_vars[var_name][k] = numpy_array_placeholder
                                     uses_numpy_placeholders = True
 
-                        # update the size of the variable now that large numpy arrays have been replaced with placeholders
+                        # update the size of the variable now that large numpy arrays have been replaced
+                        # with placeholders
                         if uses_numpy_placeholders:
                             self.__internal__['var_info'][var_name]['size_before_numpy_placeholders'] = \
                                 self.__internal__['var_info'][var_name]['size']
@@ -166,11 +244,6 @@ class VarPack:
                     if self.__internal__['var_info'][var_name]['size'] >= sep_var_min_size:
                         sep_vars.add(var_name)
 
-        # do not save self.__internal__
-        # if '__internal__' in pickle_vars:
-        #     pickle_vars.remove('__internal__')
-        # if '__internal__' in sep_vars:
-        #     sep_vars.remove('__internal__')
 
         # save the rest of variables as pickle
         pickle_dict = dict()
@@ -198,8 +271,8 @@ class VarPack:
             json.dump(self.__internal__['var_info'], outfile, indent=4)
 
         # must copy the files skipped during loading to the save folder (if saving to a different folder)
-        if save_folder != self.__internal__['loaded_from_folder'] and \
-                self.__internal__['loaded_from_folder'] is not None:
+        if save_folder != self.__internal__['attached_folder'] and \
+                self.__internal__['attached_folder'] is not None:
             vars_needs_copying = set(self.__internal__['var_info'].keys()) - set(obj_vars)
 
             files_need_copying = set()
@@ -208,17 +281,33 @@ class VarPack:
 
             # copy the files from where variables were loaded to the saved folder
             for filename in files_need_copying:
-                shutil.copyfile(os.path.join(self.__internal__['loaded_from_folder'], filename),
+                shutil.copyfile(os.path.join(self.__internal__['attached_folder'], filename),
                                 os.path.join(save_folder, filename))
 
             print('Copied %d files associated with skipped variables into the save folder.' % len(files_need_copying))
 
-    def load(self, load_folder, try_numpy_mmap_mode='r+', stop_on_error=True, skip_loading=None):
+        base_folder = self.__internal__['attached_folder']
+        if base_folder is None:
+            base_folder = save_folder
+        self._replace_numpy_placeholders(self.__internal__['var_info'], base_folder,
+                                         numpy_mmap_mode=self.__internal__['numpy_mmap_mode'], stop_on_error=True,
+                                         mmap_vars_list=None)
+
+        # if data was never loaded, set the loaded folder to the first save location.
+        if self.__internal__['attached_folder'] is None:
+            self.__internal__['attached_folder'] = save_folder
+
+    def load(self, load_folder, numpy_mmap_mode='r+', stop_on_error=True, skip_loading=None):
+
+        mmap_vars_list = list()  # the list of variables and dictionary fields that have been numpy memory-mapped
 
         # read the manifest.json file
         try:
             with open(os.path.join(load_folder, JSON_FILENAME), 'r') as json_file:
                 var_info = json.load(json_file)
+                print(var_info)
+                return
+
                 self.__internal__['var_info'] = var_info
         except EnvironmentError:
             print('Error when loading ' + JSON_FILENAME + ' file.')
@@ -228,7 +317,10 @@ class VarPack:
         files_to_load = set()
         self.__internal__['skipped_loading_vars'] = set()
 
-        skip_loading = set(skip_loading)
+        if skip_loading is None:
+            skip_loading = set()
+        else:
+            skip_loading = set(skip_loading)
 
         for var_name in var_info:
             if var_name in skip_loading:
@@ -250,18 +342,6 @@ class VarPack:
                     # transfer the variables to the object
                     if file_name == MISC_VAR_FILENAME:
                         for v in loaded_vars:
-                            if 'uses_numpy_placeholders' in var_info[v] and var_info[v]['uses_numpy_placeholders']:
-                                # go over keys in the dictionary and replace the placeholders with numpy arrays
-                                for k in loaded_vars[v]:
-                                    if isinstance(loaded_vars[v][k], NumpyArrayPlaceholder):
-                                        loaded_vars[v][k] = loaded_vars[v][k].load(load_folder, try_numpy_mmap_mode)
-
-                                        if isinstance(loaded_vars[v][k], NumpyArrayPlaceholder):
-                                            print('Could load numpy array from the placeholder in variable: %s, key: %s'
-                                                  % (v, k))
-                                            if stop_on_error:
-                                                return None
-
                             if v in skip_loading:  # even if the variable was
                                 print('Variable %s was saved in misc. variables file so it was loaded with them.' % v)
                                 self.__setattr__(v, loaded_vars[v])
@@ -281,15 +361,34 @@ class VarPack:
                         print('Skipping its contents.')
                         files_with_load_error.append(file_name)
             elif extension == '.npy':
-                np_arr = np.load(os.path.join(load_folder, file_name))
                 var_name, _ = os.path.splitext(os.path.basename(file_name))
+
+                # first try to mmap, otherwise load regularly
+                try:
+                    np_arr = np.load(os.path.join(load_folder, file_name), mmap_mode=numpy_mmap_mode)
+                    mmap_vars_list.append(var_name)
+                except:
+                    np_arr = np.load(os.path.join(load_folder, file_name))
+
                 self.__setattr__(var_name, np_arr)
             else:
                 print('Unable to load file %s: Unknown file extension %s .' % (file_name, extension))
                 files_with_load_error.append(file_name)
 
+        # go  over all the loaded variables and replace placeholder numpy arrays with mmap ones
+        self._replace_numpy_placeholders(var_info, load_folder, numpy_mmap_mode=numpy_mmap_mode,
+                                         stop_on_error=stop_on_error,
+                                         mmap_vars_list=mmap_vars_list)
+        self.__internal__['numpy_mmap_mode'] = numpy_mmap_mode
+
         num_skipped_vars = len(var_info.keys()) - len(vars(self))
         if num_skipped_vars > 0:
             print('Skipped loading %d variables.' % num_skipped_vars)
 
-        self.__internal__['loaded_from_folder'] = load_folder
+        if len(mmap_vars_list) > 0:
+            print('The following numpy variables have been memory-mapped with option %s:' % numpy_mmap_mode)
+            print('    ' + str(mmap_vars_list))
+        else:
+            print('No properties has been memory-mapped.')
+
+        self.__internal__['attached_folder'] = load_folder

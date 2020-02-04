@@ -8,13 +8,13 @@ import shutil
 # min required Python 3.4
 
 MISC_VAR_FILENAME = '__misc_vars__.pickle'
-JSON_FILENAME = 'pack.json'
+JSON_FILENAME = 'varpack.json'
 PICKLE_PROTOCOL = 4
 from typing import Union, Dict, List
 import typing
 
 
-def get_total_obj_size(obj, seen=None):
+def get_total_obj_size(obj, seen=None, count_mmap_size=False):
     """Recursively finds size of objects, includes the size of embedded objects."""
     size = sys.getsizeof(obj)
     if seen is None:
@@ -28,6 +28,8 @@ def get_total_obj_size(obj, seen=None):
     if isinstance(obj, dict):
         size += sum([get_total_obj_size(v, seen) for v in obj.values()])
         size += sum([get_total_obj_size(k, seen) for k in obj.keys()])
+    elif isinstance(obj, np.memmap):
+        size += os.path.getsize(obj.filename)
     elif hasattr(obj, '__dict__'):
         size += get_total_obj_size(obj.__dict__, seen)
     elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes, bytearray)):
@@ -168,7 +170,8 @@ class VarPack:
         for var_name in obj_vars:
             if var_name != '__internal__':  # do not save __internal__ variable.
                 self.__internal__['var_info'][var_name] = dict()
-                self.__internal__['var_info'][var_name]['size'] = get_total_obj_size(obj_vars[var_name])
+                self.__internal__['var_info'][var_name]['size'] = get_total_obj_size(obj_vars[var_name],
+                                                                                     count_mmap_size=False)
 
                 # if the variable is a numpy array then try to save it as .npy
                 if isinstance(obj_vars[var_name], np.ndarray):
@@ -232,8 +235,9 @@ class VarPack:
                         # update the size of the variable now that large numpy arrays have been replaced
                         # with placeholders
                         if uses_numpy_placeholders:
-                            self.__internal__['var_info'][var_name]['size_before_numpy_placeholders'] = \
-                                self.__internal__['var_info'][var_name]['size']
+                            if not 'size_before_numpy_placeholders' in self.__internal__['var_info'][var_name]:
+                                self.__internal__['var_info'][var_name]['size_before_numpy_placeholders'] = \
+                                    get_total_obj_size(obj_vars[var_name], count_mmap_size=True)
 
                             self.__internal__['var_info'][var_name]['size'] = get_total_obj_size(obj_vars[var_name])
 

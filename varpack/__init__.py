@@ -55,7 +55,7 @@ class NumpyArrayPlaceholder:
 
             filename = os.path.join(save_folder, var_name + str(key_hash) + '.npy')
             try:
-                # need to allow pickle here since no other way to save mixed numpy and Python objects
+                # need to allow pickle here since no other way to save_copy mixed numpy and Python objects
                 np.save(filename, np_arr, allow_pickle=True)
                 self.filename = os.path.basename(filename)
             except EnvironmentError:
@@ -64,7 +64,7 @@ class NumpyArrayPlaceholder:
 
     def load(self, load_folder, mmap_mode):
 
-        # need to allow pickle here since no other way to save mixed numpy and Python objects
+        # need to allow pickle here since no other way to save_copy mixed numpy and Python objects
         full_filename = os.path.join(load_folder, self.filename)
 
         try:
@@ -84,14 +84,17 @@ class NumpyArrayPlaceholder:
 
 class VarPack:
 
-    def __init__(self):
+    def __init__(self, load_folder=None, **kwargs):
         self.__internal__ = dict()
 
         # for each variable as key, contains different information such as its size (in memory) and
         # the file where it is saved.
         self.__internal__['var_info'] = dict()
         self.__internal__['attached_folder'] = None
-        self.__internal__['numpy_mmap_mode'] = 'r+'
+        self.__internal__['numpy_mmap_mode'] = 'w+'
+
+        if load_folder is not None:
+            self.load(load_folder=load_folder, **kwargs)
 
     def get_attached_folder(self):
         return self.__internal__['attached_folder']
@@ -120,23 +123,30 @@ class VarPack:
                             if mmap_vars_list is not None:
                                 mmap_vars_list.append(v + '[' + k + ']')
 
-    def save(self, save_folder: typing.Optional[str] = None, max_dict_keys: int = 1000,
-             min_dict_numpy_size: int = 10000, sep_var_min_size: int = 1e4,
-             sep_vars: typing.Optional[Union[Dict, List]] = None):
+    def set_attached_folder(self, attached_folder=None):
         """
-        Save the pack of variables. If no save folder is provided, the variables are saved in the folder from which
-        they were loaded.
+        set attached_folder, this is the folder where the pack is saved to and kept up-to-date-with.
+        :param attached_folder:
+        :return: None
+        """
+        assert attached_folder is not None, 'attached_folder need to be specified.'
 
-        * a subset variables can be marked to be saved in separate files, e.g. so they could later be loaded individually
+        if self.__internal__['attached_folder'] is not None and self.__internal__['attached_folder'] != attached_folder:
+            print('Attached folder is already set to a different directory and cannot be changed.')
+            print('Load a new instance of this class to attach to a different directory.')
+        else:
+            self.__internal__['attached_folder'] = attached_folder
+
+    def save(self, max_dict_keys: int = 1000,
+                  min_dict_numpy_size: int = 10000, sep_var_min_size: int = 1e4,
+                  sep_vars: typing.Optional[Union[Dict, List]] = None):
+        """
+        Save the pack of variables into the 'attached folder'. This folder must have been already set up for the
+        var pack using set_attached_folder() method.
+
+        A subset variables can be marked to be saved in separate files, e.g. so they could later be loaded individually
         or to be excluded from loading the pack.
 
-        * when saving to a new folder, files associated with variables that were excluded during load will be copied
-          into the save folder.
-
-        * saving into a new folder does not change the attached_folder (folder from which the variables were loaded).
-          Unless data was never loaded from a folder. This values is stored in .__internal__['attached_folder']
-
-        :param save_folder: folder in which all the variables will be saved.
         :param max_dict_keys: do not try to replace large numpy arrays with dictionaries with larger than
                               this number of keys. This is mainly to avoid wasting time checking keys in very large
                               dictionaries.
@@ -149,11 +159,10 @@ class VarPack:
         :return: None
         """
 
-        if save_folder is None:
-            save_folder = self.__internal__['attached_folder']
-            print('Saving variables into the attached folder: ', save_folder)
+        save_folder = self.__internal__['attached_folder']
+        print('Saving variables into the attached folder: ', save_folder)
 
-        assert save_folder is not None, 'Missing save_folder input parameter and no loaded folder exists to default to.'
+        assert save_folder is not None, 'attached folder has not yet been set'
 
         os.makedirs(save_folder, exist_ok=True)
 
@@ -168,21 +177,22 @@ class VarPack:
             sep_vars = set(sep_vars)
 
         for var_name in obj_vars:
-            if var_name != '__internal__':  # do not save __internal__ variable.
+            if var_name != '__internal__':  # do not save_copy __internal__ variable.
                 self.__internal__['var_info'][var_name] = dict()
                 self.__internal__['var_info'][var_name]['size'] = get_total_obj_size(obj_vars[var_name],
                                                                                      count_mmap_size=False)
 
-                # if the variable is a numpy array then try to save it as .npy
+                # if the variable is a numpy array then try to save_copy it as .npy
                 if isinstance(obj_vars[var_name], np.ndarray):
 
                     if type(obj_vars[var_name]) is np.memmap:
-                        # flush mmap to disk, no need to re-save if
+                        # flush mmap to disk, no need to re-save_copy if
                         # saving to the same folder where it is memory-mapped
                         obj_vars[var_name].flush()
 
                         # saving to a new folder (not where the data was loaded from)
                         # copy numpy files
+                        # this should never happen anymore.
                         if save_folder != self.__internal__['attached_folder']:
                             print('Copying...')
                             shutil.copyfile(obj_vars[var_name].filename,
@@ -217,14 +227,10 @@ class VarPack:
                             if isinstance(obj_vars[var_name][k], np.ndarray) and \
                                     obj_vars[var_name][k].size >= min_dict_numpy_size:
 
-                                print('came here for ', k)
-                                print(str(type(obj_vars[var_name][k])))
                                 numpy_array_placeholder = NumpyArrayPlaceholder(obj_vars[var_name][k],
                                                                                 save_folder=save_folder,
                                                                                 var_name=var_name,
                                                                                 key_hash=k.__hash__())
-
-                                print('came out for ', k)
 
                                 # if saving the value as a numpy array was successful,
                                 # put the placeholder object there instead.
@@ -249,13 +255,13 @@ class VarPack:
                         sep_vars.add(var_name)
 
 
-        # save the rest of variables as pickle
+        # save_copy the rest of variables as pickle
         pickle_dict = dict()
         for v in pickle_vars:
             pickle_dict[v] = self.__getattribute__(v)
 
 
-        # save variables that need to have separate files
+        # save_copy variables that need to have separate files
         for var_name in sep_vars:
             with open(os.path.join(save_folder, var_name + '.pickle'), 'wb') as f:
                 pickle.dump(pickle_dict[var_name], f, protocol=PICKLE_PROTOCOL)
@@ -270,11 +276,11 @@ class VarPack:
         with open(os.path.join(save_folder, MISC_VAR_FILENAME), 'wb') as f:
             pickle.dump(misc_dict, f, protocol=PICKLE_PROTOCOL)
 
-        # save a json file with variable info
+        # save_copy a json file with variable info
         with open(os.path.join(save_folder, JSON_FILENAME), 'w') as outfile:
             json.dump(self.__internal__['var_info'], outfile, indent=4)
 
-        # must copy the files skipped during loading to the save folder (if saving to a different folder)
+        # must copy the files skipped during loading to the save_copy folder (if saving to a different folder)
         if save_folder != self.__internal__['attached_folder'] and \
                 self.__internal__['attached_folder'] is not None:
             vars_needs_copying = set(self.__internal__['var_info'].keys()) - set(obj_vars)
@@ -288,7 +294,7 @@ class VarPack:
                 shutil.copyfile(os.path.join(self.__internal__['attached_folder'], filename),
                                 os.path.join(save_folder, filename))
 
-            print('Copied %d files associated with skipped variables into the save folder.' % len(files_need_copying))
+            print('Copied %d files associated with skipped variables into the save_copy folder.' % len(files_need_copying))
 
         base_folder = self.__internal__['attached_folder']
         if base_folder is None:
@@ -297,11 +303,25 @@ class VarPack:
                                          numpy_mmap_mode=self.__internal__['numpy_mmap_mode'], stop_on_error=True,
                                          mmap_vars_list=None)
 
-        # if data was never loaded, set the loaded folder to the first save location.
+        # if data was never loaded, set the loaded folder to the first save_copy location.
         if self.__internal__['attached_folder'] is None:
             self.__internal__['attached_folder'] = save_folder
 
-    def load(self, load_folder, numpy_mmap_mode='r+', stop_on_error=True, skip_loading=None):
+    def save_then_copy(self, copy_folder, **kwargs):
+        """
+        save into a new folder and then sane
+        :param copy_folder: the folder into which attached folder content is copied to.
+        :param args: save arguments as save()
+        :return: None
+        """
+        self.save(**kwargs)
+        from distutils.dir_util import copy_tree
+        os.makedirs(copy_folder, exist_ok=True)
+
+        print('Copying the attached folder to:', copy_folder)
+        copy_tree(self.__internal__['attached_folder'], copy_folder)
+
+    def load(self, load_folder, numpy_mmap_mode='w+', stop_on_error=True, skip_loading=None):
 
         mmap_vars_list = list()  # the list of variables and dictionary fields that have been numpy memory-mapped
 

@@ -48,8 +48,6 @@ class NumpyArrayPlaceholder:
                 np_arr.flush()
                 dir_name = os.path.dirname(np_arr.filename)
                 self.filename = os.path.basename(np_arr.filename)
-                if dir_name != save_folder:   # the mmap file is in a different directory than where we are saving
-                    shutil.copyfile(np_arr.filename, os.path.join(save_folder, os.path.basename(np_arr.filename)) )
 
                 return
 
@@ -82,7 +80,7 @@ class NumpyArrayPlaceholder:
                     return self
 
 
-class VarPack:
+class Varpack:
 
     def __init__(self, load_folder=None, **kwargs):
         self.__internal__ = dict()
@@ -91,9 +89,10 @@ class VarPack:
         # the file where it is saved.
         self.__internal__['var_info'] = dict()
         self.__internal__['attached_folder'] = None
-        self.__internal__['numpy_mmap_mode'] = 'w+'
+        self.__internal__['numpy_mmap_mode'] = 'r+'
 
         if load_folder is not None:
+            print('Loading from ', load_folder)
             self.load(load_folder=load_folder, **kwargs)
 
     def get_attached_folder(self):
@@ -104,10 +103,6 @@ class VarPack:
         # go  over all the loaded variables and replace placeholder numpy arrays with mmap ones
         all_vars = vars(self)
         for v in all_vars:
-
-            # if v != '__internal__':
-            #     print(var_info[v])
-
             if v != '__internal__' and 'uses_numpy_placeholders' in var_info[v] and var_info[v]['uses_numpy_placeholders']:
                 # go over keys in the dictionary and replace the placeholders with numpy arrays
                 for k in all_vars[v]:
@@ -190,14 +185,6 @@ class VarPack:
                         # saving to the same folder where it is memory-mapped
                         obj_vars[var_name].flush()
 
-                        # saving to a new folder (not where the data was loaded from)
-                        # copy numpy files
-                        # this should never happen anymore.
-                        if save_folder != self.__internal__['attached_folder']:
-                            print('Copying...')
-                            shutil.copyfile(obj_vars[var_name].filename,
-                                            os.path.join(save_folder, os.path.basename(obj_vars[var_name].filename)))
-
                         self.__internal__['var_info'][var_name]['filename'] = \
                             os.path.basename(obj_vars[var_name].filename)
                         self.__internal__['var_info'][var_name]['shape'] = obj_vars[var_name].shape
@@ -276,25 +263,9 @@ class VarPack:
         with open(os.path.join(save_folder, MISC_VAR_FILENAME), 'wb') as f:
             pickle.dump(misc_dict, f, protocol=PICKLE_PROTOCOL)
 
-        # save_copy a json file with variable info
+        # a json file with variable info
         with open(os.path.join(save_folder, JSON_FILENAME), 'w') as outfile:
             json.dump(self.__internal__['var_info'], outfile, indent=4)
-
-        # must copy the files skipped during loading to the save_copy folder (if saving to a different folder)
-        if save_folder != self.__internal__['attached_folder'] and \
-                self.__internal__['attached_folder'] is not None:
-            vars_needs_copying = set(self.__internal__['var_info'].keys()) - set(obj_vars)
-
-            files_need_copying = set()
-            for v in vars_needs_copying:
-                files_need_copying.add(self.__internal__['var_info'][v]['filename'])
-
-            # copy the files from where variables were loaded to the saved folder
-            for filename in files_need_copying:
-                shutil.copyfile(os.path.join(self.__internal__['attached_folder'], filename),
-                                os.path.join(save_folder, filename))
-
-            print('Copied %d files associated with skipped variables into the save_copy folder.' % len(files_need_copying))
 
         base_folder = self.__internal__['attached_folder']
         if base_folder is None:
@@ -321,16 +292,25 @@ class VarPack:
         print('Copying the attached folder to:', copy_folder)
         copy_tree(self.__internal__['attached_folder'], copy_folder)
 
-    def load(self, load_folder, numpy_mmap_mode='w+', stop_on_error=True, skip_loading=None):
+    def load(self, load_folder, numpy_mmap_mode='r+', stop_on_error=True, skip_loading=None):
+        """
+        Attach to a folder and load data from it.
+        :param load_folder: the varpack folder to load the variables from.
+        :param numpy_mmap_mode: must be 'r+', 'r' or 'c'.
+               see https://numpy.org/doc/1.18/reference/generated/numpy.memmap.html
+        :param stop_on_error: stop if any errors where encountered during load.
+        :param skip_loading: a list/set of variable names to skip loading from the folder.
+        :return: None
+        """
+
+        assert numpy_mmap_mode in ['r+', 'r', 'c'], "numpy_mmap_mode must be 'r+', 'r' or 'c'."
 
         mmap_vars_list = list()  # the list of variables and dictionary fields that have been numpy memory-mapped
 
-        # read the manifest.json file
+        # read the varpack.json file
         try:
             with open(os.path.join(load_folder, JSON_FILENAME), 'r') as json_file:
                 var_info = json.load(json_file)
-                print(var_info)
-                return
 
                 self.__internal__['var_info'] = var_info
         except EnvironmentError:

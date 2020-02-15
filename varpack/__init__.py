@@ -49,6 +49,9 @@ class NumpyArrayPlaceholder:
                 dir_name = os.path.dirname(np_arr.filename)
                 self.filename = os.path.basename(np_arr.filename)
 
+                if dir_name != save_folder:  # the mmap file is in a different directory than where we are saving
+                    shutil.copyfile(np_arr.filename, os.path.join(save_folder, os.path.basename(np_arr.filename)))
+
                 return
 
             filename = os.path.join(save_folder, var_name + str(key_hash) + '.npy')
@@ -324,7 +327,7 @@ class Varpack:
                 self.__internal__['var_info'] = var_info
         except EnvironmentError:
             print('Error when loading ' + JSON_FILENAME + ' file.')
-            return None
+            raise
 
         # get all the files where the variables have been saved to (in case there are extra files in the folder)
         files_to_load = set()

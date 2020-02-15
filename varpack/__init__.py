@@ -72,17 +72,23 @@ class NumpyArrayPlaceholder:
             print('Failed to memory map file:', full_filename)
             if mmap_mode is not None:
                 try:
-                    np_arr = np.load(full_filename, mmap_mode=None)
+                    np_arr = np.load(full_filename, allow_pickle=True, mmap_mode=None)
                     print('Loaded it all in memory instead.')
                     return np_arr
                 except:
                     print('Also failed to load it all in memory.')
+                    raise
                     return self
 
 
 class Varpack:
 
     def __init__(self, load_folder=None, **kwargs):
+        """
+        Initiate VBarpack class instance. Optionally attach it to a folder and load the data.
+        :param load_folder: attached/load folder.
+        :param kwargs: key-value arguments passed to load()
+        """
         self.__internal__ = dict()
 
         # for each variable as key, contains different information such as its size (in memory) and
@@ -292,7 +298,8 @@ class Varpack:
         print('Copying the attached folder to:', copy_folder)
         copy_tree(self.__internal__['attached_folder'], copy_folder)
 
-    def load(self, load_folder, numpy_mmap_mode='r+', stop_on_error=True, skip_loading=None):
+    def load(self, load_folder, numpy_mmap_mode='r+', stop_on_error=True,
+             skip_loading=None, keep_loaded_skips=False):
         """
         Attach to a folder and load data from it.
         :param load_folder: the varpack folder to load the variables from.
@@ -300,6 +307,8 @@ class Varpack:
                see https://numpy.org/doc/1.18/reference/generated/numpy.memmap.html
         :param stop_on_error: stop if any errors where encountered during load.
         :param skip_loading: a list/set of variable names to skip loading from the folder.
+        :param keep_loaded_skips: whether to keep a variable was in __misc__vars.pickle file even if it is in skipped
+                                  list. Default: False
         :return: None
         """
 
@@ -347,11 +356,12 @@ class Varpack:
                     if file_name == MISC_VAR_FILENAME:
                         for v in loaded_vars:
                             if v in skip_loading:  # even if the variable was
-                                print('Variable %s was saved in misc. variables file so it was loaded with them.' % v)
-                                self.__setattr__(v, loaded_vars[v])
+                                if keep_loaded_skips:
+                                    print('Variable %s was saved in misc. variables file so it was loaded with them.' % v)
+                                    self.__setattr__(v, loaded_vars[v])
 
-                                # since we ended up loading it anyways
-                                self.__internal__['skipped_loading_vars'].remove(v)
+                                    # since we ended up loading it anyways
+                                    self.__internal__['skipped_loading_vars'].remove(v)
                             else:  # if not in skip list
                                 self.__setattr__(v, loaded_vars[v])
                     else:  # if it is not the misc_vars file, then assign it directly

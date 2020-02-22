@@ -62,7 +62,7 @@ class TestVarPack(TestCase):
 
             # add large arrays
             varpack.np_arr = np.zeros((100, 1000, 100))
-            varpack.dict_of_np_arr = {'key1': np.zeros((100, 1000, 100)), 'key2': np.zeros((200, 1000, 100))}
+            varpack.dict_of_np_arr = {'key1': np.ones((100, 1000, 100)), 'key2': np.zeros((200, 1000, 100))}
 
             varpack.save()
 
@@ -73,6 +73,10 @@ class TestVarPack(TestCase):
                 loaded_varpack = vp.Varpack(tmpdirname2)
 
                 self.assertTrue(np.all(loaded_varpack.np_arr - 1 == 0))
+                self.assertTrue(np.all(loaded_varpack.dict_of_np_arr['key1'] == 1))
+                self.assertTrue(np.all(loaded_varpack.dict_of_np_arr['key2'] == 0))
+                self.assertTrue(loaded_varpack.dict_of_np_arr['key1'].shape == (100, 1000, 100))
+                self.assertTrue(loaded_varpack.dict_of_np_arr['key2'].shape == (200, 1000, 100))
 
     def test_skipped_load(self):
         varpack = vp.Varpack()
@@ -100,7 +104,3 @@ class TestVarPack(TestCase):
 
                 loaded_varpack2 = vp.Varpack(tmpdirname2)
                 self.assertTrue(hasattr(loaded_varpack2, 'np_arr'))
-
-
-
-

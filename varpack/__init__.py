@@ -99,6 +99,7 @@ class Varpack:
         self.__internal__['var_info'] = dict()
         self.__internal__['attached_folder'] = None
         self.__internal__['numpy_mmap_mode'] = 'r+'
+        self.__internal__['skipped_loading_vars'] = set()
 
         if load_folder is not None:
             print('Loading from ', load_folder)
@@ -112,7 +113,8 @@ class Varpack:
         # go  over all the loaded variables and replace placeholder numpy arrays with mmap ones
         all_vars = vars(self)
         for v in all_vars:
-            if v != '__internal__' and 'uses_numpy_placeholders' in var_info[v] and var_info[v]['uses_numpy_placeholders']:
+            if v != '__internal__' and 'uses_numpy_placeholders' in var_info[v] and var_info[v][
+                'uses_numpy_placeholders']:
                 # go over keys in the dictionary and replace the placeholders with numpy arrays
                 for k in all_vars[v]:
                     if isinstance(all_vars[v][k], NumpyArrayPlaceholder):
@@ -142,8 +144,8 @@ class Varpack:
             self.__internal__['attached_folder'] = attached_folder
 
     def save(self, max_dict_keys: int = 1000,
-                  min_dict_numpy_size: int = 10000, sep_var_min_size: int = 1e4,
-                  sep_vars: typing.Optional[Union[Dict, List]] = None):
+             min_dict_numpy_size: int = 10000, sep_var_min_size: int = 1e4,
+             sep_vars: typing.Optional[Union[Dict, List]] = None):
         """
         Save the pack of variables into the 'attached folder'. This folder must have been already set up for the
         var pack using set_attached_folder() method.
@@ -182,6 +184,14 @@ class Varpack:
 
         for var_name in obj_vars:
             if var_name != '__internal__':  # do not save_copy __internal__ variable.
+
+                # if a new var was added with the same name as the skipped var, this would prevent accidental overwrite.
+                assert var_name not in self.__internal__['skipped_loading_vars'], 'The new variable "' + var_name + \
+                                                                                  '" has the same name as a variable ' \
+                                                                                  'which was skipped during loading. ' \
+                                                                                  'Please rename the new variable and' \
+                                                                                  ' try saving again.'
+
                 self.__internal__['var_info'][var_name] = dict()
                 self.__internal__['var_info'][var_name]['size'] = get_total_obj_size(obj_vars[var_name],
                                                                                      count_mmap_size=False)
@@ -250,12 +260,10 @@ class Varpack:
                     if self.__internal__['var_info'][var_name]['size'] >= sep_var_min_size:
                         sep_vars.add(var_name)
 
-
         # save_copy the rest of variables as pickle
         pickle_dict = dict()
         for v in pickle_vars:
             pickle_dict[v] = self.__getattribute__(v)
-
 
         # save_copy variables that need to have separate files
         for var_name in sep_vars:
@@ -360,7 +368,8 @@ class Varpack:
                         for v in loaded_vars:
                             if v in skip_loading:  # even if the variable was
                                 if keep_loaded_skips:
-                                    print('Variable %s was saved in misc. variables file so it was loaded with them.' % v)
+                                    print(
+                                        'Variable %s was saved in misc. variables file so it was loaded with them.' % v)
                                     self.__setattr__(v, loaded_vars[v])
 
                                     # since we ended up loading it anyways

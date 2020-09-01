@@ -4,6 +4,7 @@ import os
 import json
 import sys
 import shutil
+import copy
 
 # min required Python 3.4
 
@@ -12,6 +13,25 @@ JSON_FILENAME = 'varpack.json'
 PICKLE_PROTOCOL = 4
 from typing import Union, Dict, List
 import typing
+
+
+def mmap_var_to_memory(x):
+    """
+    Converts a memory-mapped numpy array, or a python dictionary with mmap values, to a regular in-memory array
+    :param x: memory-mapped array
+    :return: numpy array (in RAM)
+    """
+    if type(x) is dict:
+        y = dict()
+        for k in x:
+            y[k] = mmap_var_to_memory(x[k])
+    elif type(x) is np.memmap:
+        y = np.zeros(shape=x.shape, dtype=x.dtype)
+        y[:] = x[:]
+    else:
+        y = x
+
+    return y
 
 
 def get_total_obj_size(obj, seen=None, count_mmap_size=False):
@@ -29,7 +49,10 @@ def get_total_obj_size(obj, seen=None, count_mmap_size=False):
         size += sum([get_total_obj_size(v, seen) for v in obj.values()])
         size += sum([get_total_obj_size(k, seen) for k in obj.keys()])
     elif isinstance(obj, np.memmap):
-        size += os.path.getsize(obj.filename)
+        if obj.filename is not None:
+            size += os.path.getsize(obj.filename)
+        else:
+            size = np.nan
     elif hasattr(obj, '__dict__'):
         size += get_total_obj_size(obj.__dict__, seen)
     elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes, bytearray)):
@@ -46,13 +69,19 @@ class NumpyArrayPlaceholder:
             # if the variable is numpy mmapped
             if isinstance(np_arr, np.memmap):
                 np_arr.flush()
-                dir_name = os.path.dirname(np_arr.filename)
-                self.filename = os.path.basename(np_arr.filename)
+                try:
+                    dir_name = os.path.dirname(np_arr.filename)
+                    self.filename = os.path.basename(np_arr.filename)
 
-                if dir_name != save_folder:  # the mmap file is in a different directory than where we are saving
-                    shutil.copyfile(np_arr.filename, os.path.join(save_folder, os.path.basename(np_arr.filename)))
+                    if dir_name != save_folder:  # the mmap file is in a different directory than where we are saving
+                        shutil.copyfile(np_arr.filename, os.path.join(save_folder, os.path.basename(np_arr.filename)))
 
-                return
+                    return
+                except TypeError:  # if encountered with problems, copy into memory and save
+                    print('Converting a mmaped array with no associated file into regular numpy array.')
+                    np_arr_mem = np.zeros(shape=np_arr.shape, dtype=np_arr.dtype)
+                    np_arr_mem[:] = np_arr[:]
+                    np_arr = np_arr_mem
 
             filename = os.path.join(save_folder, var_name + str(key_hash) + '.npy')
             try:
@@ -72,7 +101,7 @@ class NumpyArrayPlaceholder:
             np_arr = np.load(full_filename, allow_pickle=True, mmap_mode=mmap_mode)
             return np_arr
         except:
-            print('Failed to memory map file:', full_filename)
+            print('Could not memory map file:', full_filename)
             if mmap_mode is not None:
                 try:
                     np_arr = np.load(full_filename, allow_pickle=True, mmap_mode=None)
@@ -86,10 +115,10 @@ class NumpyArrayPlaceholder:
 
 class Varpack:
 
-    def __init__(self, load_folder=None, **kwargs):
+    def __init__(self, attached_folder=None, **kwargs):
         """
-        Initiate VBarpack class instance. Optionally attach it to a folder and load the data.
-        :param load_folder: attached/load folder.
+        Initiate Varpack class instance. Optionally attach it to a folder and load the data.
+        :param attached_folder: attached/load folder.
         :param kwargs: key-value arguments passed to load()
         """
         self.__internal__ = dict()
@@ -100,20 +129,42 @@ class Varpack:
         self.__internal__['attached_folder'] = None
         self.__internal__['numpy_mmap_mode'] = 'r+'
         self.__internal__['skipped_loading_vars'] = set()
+        self.__internal__['skip_saving_vars'] = set()
 
-        if load_folder is not None:
-            print('Loading from ', load_folder)
-            self.load(load_folder=load_folder, **kwargs)
+        if attached_folder is not None:
+            # load if json file exists, otherwise attach to it
+            if os.path.isfile(os.path.join(attached_folder, JSON_FILENAME)):
+                print('Loading from ', attached_folder)
+                self.load(load_folder=attached_folder, **kwargs)
+            else:
+                self.__internal__['attached_folder'] = attached_folder
 
     def get_attached_folder(self):
         return self.__internal__['attached_folder']
+
+    def detach(self):
+        # loads all the variables into memory and detaches from the disk folder. This enables saving it somewhere else.
+        if self.__internal__['attached_folder'] is None:   # already detached
+            return self
+
+        # loads everything into memory and sets attached_folder to None
+        all_vars = vars(self)
+
+        detached_self = copy.deepcopy(self)
+        detached_self.__internal__['attached_folder'] = None
+
+        for var_name in all_vars:
+            v = mmap_var_to_memory(getattr(detached_self, var_name))
+            setattr(detached_self, var_name, v)
+
+        return detached_self
 
     def _replace_numpy_placeholders(self, var_info, load_folder, numpy_mmap_mode, stop_on_error,
                                     mmap_vars_list=None):
         # go  over all the loaded variables and replace placeholder numpy arrays with mmap ones
         all_vars = vars(self)
         for v in all_vars:
-            if v != '__internal__' and 'uses_numpy_placeholders' in var_info[v] and var_info[v][
+            if (not v in self.__internal__['skip_saving_vars']) and v != '__internal__' and 'uses_numpy_placeholders' in var_info[v] and var_info[v][
                 'uses_numpy_placeholders']:
                 # go over keys in the dictionary and replace the placeholders with numpy arrays
                 for k in all_vars[v]:
@@ -140,12 +191,15 @@ class Varpack:
         if self.__internal__['attached_folder'] is not None and self.__internal__['attached_folder'] != attached_folder:
             print('Attached folder is already set to a different directory and cannot be changed.')
             print('Load a new instance of this class to attach to a different directory.')
+            print('Skipping...')
+            return
         else:
             self.__internal__['attached_folder'] = attached_folder
 
-    def save(self, max_dict_keys: int = 1000,
+    def save(self, save_folder=None, max_dict_keys: int = 1000,
              min_dict_numpy_size: int = 10000, sep_var_min_size: int = 1e4,
-             sep_vars: typing.Optional[Union[Dict, List]] = None):
+             sep_vars: typing.Optional[Union[Dict, List]] = None,
+             skip_saving_vars: typing.Set = None):
         """
         Save the pack of variables into the 'attached folder'. This folder must have been already set up for the
         var pack using set_attached_folder() method.
@@ -153,6 +207,9 @@ class Varpack:
         A subset variables can be marked to be saved in separate files, e.g. so they could later be loaded individually
         or to be excluded from loading the pack.
 
+        :param save_folder: if provided and not equal to attached folder, all the data is loaded into memory and
+                            then a new folder is made and a copy of the data is saved to that folder. Save then
+                            returns the newly created varpack object, and leaves the original object intact.
         :param max_dict_keys: do not try to replace large numpy arrays with dictionaries with larger than
                               this number of keys. This is mainly to avoid wasting time checking keys in very large
                               dictionaries.
@@ -162,10 +219,28 @@ class Varpack:
                                   separate pickle file (so for example could be excluded during load).
         :param sep_vars: a list containing variables that need to be saved in a different pickle file.
                          All numpy arrays are automatically saved in separate .npy files.
+        :param skip_saving_vars: a set with the variables to be skipped during save.
         :return: None
         """
 
-        save_folder = self.__internal__['attached_folder']
+        # ToDo: add 'skip resaving' and 'fully skip saving' and 'save only' options to save()
+
+        if skip_saving_vars is not None:
+            self.__internal__['skip_saving_vars'] = skip_saving_vars
+
+        if save_folder is None:
+            save_folder = self.__internal__['attached_folder']
+
+        if save_folder != self.__internal__['attached_folder']:
+            detached_self = self.detach()
+            detached_self.set_attached_folder(save_folder)
+
+            # must remeber to include all future input params there!
+            detached_self.save(save_folder, max_dict_keys, min_dict_numpy_size, sep_var_min_size,
+                                sep_vars, skip_saving_vars)
+            return detached_self
+
+
         print('Saving variables into the attached folder: ', save_folder)
 
         assert save_folder is not None, 'attached folder has not yet been set'
@@ -183,14 +258,13 @@ class Varpack:
             sep_vars = set(sep_vars)
 
         for var_name in obj_vars:
-            if var_name != '__internal__':  # do not save_copy __internal__ variable.
+            if var_name in self.__internal__['skip_saving_vars']:
+                print("- Skipping: " + var_name)
+                if var_name in self.__internal__['var_info']:
+                    del self.__internal__['var_info'][var_name]
+            elif var_name != '__internal__':  # do not save_copy __internal__ variable.
 
-                # if a new var was added with the same name as the skipped var, this would prevent accidental overwrite.
-                assert var_name not in self.__internal__['skipped_loading_vars'], 'The new variable "' + var_name + \
-                                                                                  '" has the same name as a variable ' \
-                                                                                  'which was skipped during loading. ' \
-                                                                                  'Please rename the new variable and' \
-                                                                                  ' try saving again.'
+                print("Saving: " + var_name)
 
                 self.__internal__['var_info'][var_name] = dict()
                 self.__internal__['var_info'][var_name]['size'] = get_total_obj_size(obj_vars[var_name],
@@ -284,6 +358,8 @@ class Varpack:
         with open(os.path.join(save_folder, JSON_FILENAME), 'w') as outfile:
             json.dump(self.__internal__['var_info'], outfile, indent=4)
 
+        # Todo: do this for every mmaped variable right after saving, instead of here for all.
+        # this would prevent messing up variables if an error occured during save
         base_folder = self.__internal__['attached_folder']
         if base_folder is None:
             base_folder = save_folder
@@ -295,13 +371,16 @@ class Varpack:
         if self.__internal__['attached_folder'] is None:
             self.__internal__['attached_folder'] = save_folder
 
+        return self
+
     def save_then_copy(self, copy_folder, **kwargs):
         """
         save into a new folder and then sane
         :param copy_folder: the folder into which attached folder content is copied to.
-        :param args: save arguments as save()
+        :param args: same arguments as save()
         :return: None
         """
+
         self.save(**kwargs)
         from distutils.dir_util import copy_tree
         os.makedirs(copy_folder, exist_ok=True)
